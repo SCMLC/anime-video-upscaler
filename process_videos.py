@@ -7,11 +7,11 @@ import numpy as np
 import torch
 import torchvision
 
-# 修正 PyTorch 2.x 相容性
+# Fix PyTorch 2.x compatibility
 if not hasattr(torch, 'torchversion'):
     torch.torchversion = torchvision.__version__
 
-# 開啟 CUDA 捲積與記憶體配置最佳化
+# Enable CUDA convolution and memory allocation optimizations
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -20,10 +20,10 @@ from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 from tqdm import tqdm
 
 # =========================================================================
-# 💡 參數設定區
+# 💡 Configuration Section
 # =========================================================================
-BATCH_SIZE = 4                  # 一次送入 GPU 推論的畫格數量
-TARGET_HEIGHT = 720            # 最終目標高度 (720p)
+BATCH_SIZE = 4                  # Number of frames fed into GPU per inference pass
+TARGET_HEIGHT = 720             # Final target height (720p)
 
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.rmvb', '.webm', '.ts')
 LEGACY_EXTENSIONS = ('.rmvb', '.flv', '.wmv', '.avi')
@@ -44,9 +44,9 @@ def append_processed_log(log_path, filename):
 
 def download_model_if_needed():
     if not os.path.exists(MODEL_NAME):
-        print(f"正在下載動漫影片專用 AI 模型 ({MODEL_NAME})...")
+        print(f"Downloading anime video AI model ({MODEL_NAME})...")
         urllib.request.urlretrieve(MODEL_URL, MODEL_NAME)
-        print("下載完成！")
+        print("Download complete!")
 
 def get_video_info(file_path):
     cmd = [
@@ -63,7 +63,7 @@ def get_video_info(file_path):
         width = int(stream_info[0])
         height = int(stream_info[1])
         fps_str = stream_info[2]
-        
+
         if '/' in fps_str:
             num, den = map(float, fps_str.split('/'))
             fps = num / den if den != 0 else 23.976
@@ -82,15 +82,16 @@ def get_video_info(file_path):
 
 def process_batch_frames_gpu_direct_downsample(batch_frames, upsampler, target_h):
     """
-    單次 4x 推理 + 純 GPU 顯存降採樣至 720p (防遠景小臉毀容)
+    Single 4x inference pass + VRAM downsampling to 720p 
+    (Prevents facial/feature distortion on distant characters)
     """
     if not batch_frames:
         return []
 
-    # 1. 轉為 CUDA Tensor
+    # 1. Convert to CUDA Tensor
     imgs = [f[:, :, ::-1] for f in batch_frames]
     imgs_array = np.stack(imgs, axis=0)
-    
+
     curr_tensor = torch.from_numpy(np.ascontiguousarray(imgs_array.transpose(0, 3, 1, 2))).to(
         upsampler.device, non_blocking=True
     ).float() / 255.0
@@ -101,14 +102,14 @@ def process_batch_frames_gpu_direct_downsample(batch_frames, upsampler, target_h
     model = upsampler.model
     model.eval()
 
-    # 計算目標 720p 的尺寸 (維持原長寬比)
+    # Calculate target 720p dimensions (maintaining aspect ratio)
     _, _, orig_h, orig_w = curr_tensor.shape
     scale = target_h / orig_h
     target_w = int(orig_w * scale)
     if target_w % 2 != 0:
         target_w += 1
 
-    # 2. 單次 4x 推理 + GPU 直接 Bicubic 下採樣 (平滑器官線條)
+    # 2. Single 4x inference + Direct GPU Bicubic downsampling (smooths feature linework)
     with torch.no_grad():
         out_4x = model(curr_tensor)
 
@@ -119,7 +120,7 @@ def process_batch_frames_gpu_direct_downsample(batch_frames, upsampler, target_h
             align_corners=False
         ).clamp_(0, 1)
 
-    # 3. 處理完畢後才拉回 CPU 轉給 FFmpeg
+    # 3. Transfer back to CPU and send to FFmpeg after processing
     final_tensor = final_tensor.data.float().cpu().clamp_(0, 1)
     output_np = final_tensor.numpy().transpose(0, 2, 3, 1)
 
@@ -138,8 +139,8 @@ def upscale_video_anime(input_path, output_path, upsampler, width, height, fps, 
     if new_width % 2 != 0:
         new_width += 1
 
-    print(f"\n[動漫 AI 單次 4x -> 720p 下採樣修復] {os.path.basename(input_path)}")
-    print(f"解析度變更: {height}p -> 降採樣 {TARGET_HEIGHT}p (Batch Size = {BATCH_SIZE})")
+    print(f"\n[Anime AI Single 4x -> 720p Downsample Enhancement] {os.path.basename(input_path)}")
+    print(f"Resolution change: {height}p -> Downsampled {TARGET_HEIGHT}p (Batch Size = {BATCH_SIZE})")
 
     audio_codec_args = ['-c:a', 'aac', '-b:a', '192k'] if force_aac else ['-c:a', 'copy']
 
@@ -153,62 +154,21 @@ def upscale_video_anime(input_path, output_path, upsampler, width, height, fps, 
         '-'
     ]
 
-    # 💡 調整 NVENC 參數：平衡畫質與檔案大小 (~300MB)
+    # 💡 Color space compatibility fix (yuv420p) + File size optimization settings
     ffmpeg_out_cmd = [
         'ffmpeg', '-y',
         '-loglevel', 'error',
         '-f', 'rawvideo',
         '-vcodec', 'rawvideo',
         '-s', f'{new_width}x{new_height}',
-        '-pix_fmt', 'bgr24',
+        '-pix_fmt', 'bgr24',        # Input: Accept raw BGR data passed from Python
         '-r', f"{fps:.3f}",
         '-i', '-',
         '-i', input_path,
         '-map', '0:v:0',
         '-map', '1:a?',
         '-c:v', 'h264_nvenc',
-        '-preset', 'p4',            # P4 平衡編碼效率與速度
-        '-rc', 'vbr',
-        '-cq', '23',                # CQ 23：品質優秀且容量控制良好
-        '-maxrate', '3M',          # 限制最大位元率 3 Mbps (防止容量暴增)
-        '-bufsize', '6M',
-    ] + audio_codec_args + [output_path]
-    # 💡 容量精確控制版 (目標 ~280MB)
-    ffmpeg_out_cmd = [
-        'ffmpeg', '-y',
-        '-loglevel', 'error',
-        '-f', 'rawvideo',
-        '-vcodec', 'rawvideo',
-        '-s', f'{new_width}x{new_height}',
-        '-pix_fmt', 'bgr24',
-        '-r', f"{fps:.3f}",
-        '-i', '-',
-        '-i', input_path,
-        '-map', '0:v:0',
-        '-map', '1:a?',
-        '-c:v', 'h264_nvenc',
-        '-preset', 'p4',
-        '-rc', 'vbr',
-        '-cq', '26',                # 改為 26 (大幅降低動漫畫面碼率，視覺幾乎無損)
-        '-maxrate', '2.2M',         # 碼率上限壓至 2.2 Mbps
-        '-bufsize', '4.4M',
-    ] + audio_codec_args + [output_path]
-
-    # 💡 修正色彩空間相容性 (yuv420p) + 控制容量的最佳化設定
-    ffmpeg_out_cmd = [
-        'ffmpeg', '-y',
-        '-loglevel', 'error',
-        '-f', 'rawvideo',
-        '-vcodec', 'rawvideo',
-        '-s', f'{new_width}x{new_height}',
-        '-pix_fmt', 'bgr24',        # 輸入端：吃 Python 送進來的 BGR Raw Data
-        '-r', f"{fps:.3f}",
-        '-i', '-',
-        '-i', input_path,
-        '-map', '0:v:0',
-        '-map', '1:a?',
-        '-c:v', 'h264_nvenc',
-        '-pix_fmt', 'yuv420p',      # 輸出端：強制轉為標準 yuv420p (解決播放相容性 + 降低容量)
+        '-pix_fmt', 'yuv420p',      # Output: Force standard yuv420p (playback compatibility + smaller file size)
         '-preset', 'p4',
         '-rc', 'vbr',
         '-cq', '26',
@@ -219,7 +179,7 @@ def upscale_video_anime(input_path, output_path, upsampler, width, height, fps, 
     proc_in = subprocess.Popen(ffmpeg_in_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
     proc_out = subprocess.Popen(ffmpeg_out_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    pbar = tqdm(total=total_frames if total_frames > 0 else None, desc="AI 處理進度")
+    pbar = tqdm(total=total_frames if total_frames > 0 else None, desc="AI Processing Progress")
     frame_bytes = width * height * 3
     batch_frames = []
 
@@ -247,8 +207,8 @@ def upscale_video_anime(input_path, output_path, upsampler, width, height, fps, 
 
             if proc_out.poll() is not None:
                 _, stderr_data = proc_out.communicate()
-                print(f"\n[FFmpeg 錯誤]:\n{stderr_data.decode('utf-8', errors='ignore')}")
-                raise RuntimeError("FFmpeg 進程異常終止")
+                print(f"\n[FFmpeg Error]:\n{stderr_data.decode('utf-8', errors='ignore')}")
+                raise RuntimeError("FFmpeg process terminated unexpectedly")
 
     except Exception as e:
         if os.path.exists(output_path):
@@ -280,12 +240,12 @@ def setup_ai_model():
 
 def main():
     if len(sys.argv) < 2:
-        print("請提供目標影片資料夾路徑！")
+        print("Please provide the target video directory path!")
         sys.exit(1)
 
     target_dir = sys.argv[1]
     if not os.path.isdir(target_dir):
-        print(f"指定路徑不存在: {target_dir}")
+        print(f"Specified path does not exist: {target_dir}")
         sys.exit(1)
 
     log_path = os.path.join(target_dir, LOG_FILENAME)
@@ -304,7 +264,7 @@ def main():
             continue
 
         if fname in processed_files:
-            print(f"[已紀錄處理過，跳過] {fname}")
+            print(f"[Already processed, skipping] {fname}")
             continue
 
         input_path = os.path.join(target_dir, fname)
@@ -328,11 +288,11 @@ def main():
                 upscale_video_anime(input_path, output_path, upsampler, width, height, fps, total_frames, force_aac=force_aac)
                 append_processed_log(log_path, fname)
                 processed_files.add(fname)
-                print(f"✓ 已成功轉檔並紀錄至 Log: {fname}")
+                print(f"✓ Successfully processed and logged: {fname}")
             except Exception as e:
-                print(f"✗ 處理失敗 (不記錄至 log): {e}")
+                print(f"✗ Processing failed (not logged): {e}")
         else:
-            print(f"[跳過] {fname} 解析度已有 {height}p")
+            print(f"[Skipping] {fname} already has a resolution of {height}p")
             append_processed_log(log_path, fname)
             processed_files.add(fname)
 
