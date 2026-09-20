@@ -16,21 +16,22 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 
 from realesrgan import RealESRGANer
-from realesrgan.archs.srvgg_arch import SRVGGNetCompact
+from basicsr.archs.rrdbnet_arch import RRDBNet
 from tqdm import tqdm
 
 # =========================================================================
 # 💡 Configuration Section
 # =========================================================================
-BATCH_SIZE = 4                  # Number of frames fed into GPU per inference pass
+BATCH_SIZE = 4                  # Number of frames fed into GPU per inference pass (reduce to 2 or 1 if VRAM is low)
 TARGET_HEIGHT = 720             # Final target height (720p)
 
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.rmvb', '.webm', '.ts')
 LEGACY_EXTENSIONS = ('.rmvb', '.flv', '.wmv', '.avi')
 LOG_FILENAME = "processed_files.txt"
 
-MODEL_URL = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth'
-MODEL_NAME = 'realesr-animevideov3.pth'
+# Switch to the deeper RealESRGAN_x4plus_anime_6B model to prevent facial line artifacts
+MODEL_URL = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'
+MODEL_NAME = 'RealESRGAN_x4plus_anime_6B.pth'
 
 def load_processed_log(log_path):
     if os.path.exists(log_path):
@@ -139,7 +140,7 @@ def upscale_video_anime(input_path, output_path, upsampler, width, height, fps, 
     if new_width % 2 != 0:
         new_width += 1
 
-    print(f"\n[Anime AI Single 4x -> 720p Downsample Enhancement] {os.path.basename(input_path)}")
+    print(f"\n[Anime AI Single 4x (6B Model) -> 720p Downsample Enhancement] {os.path.basename(input_path)}")
     print(f"Resolution change: {height}p -> Downsampled {TARGET_HEIGHT}p (Batch Size = {BATCH_SIZE})")
 
     audio_codec_args = ['-c:a', 'aac', '-b:a', '192k'] if force_aac else ['-c:a', 'copy']
@@ -225,7 +226,15 @@ def upscale_video_anime(input_path, output_path, upsampler, width, height, fps, 
 
 def setup_ai_model():
     download_model_if_needed()
-    model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type='prelu')
+    # Initialize RRDBNet for 6B anime architecture
+    model = RRDBNet(
+        num_in_ch=3,
+        num_out_ch=3,
+        num_feat=64,
+        num_block=6,
+        num_grow_ch=32,
+        scale=4
+    )
     upsampler = RealESRGANer(
         scale=4,
         model_path=MODEL_NAME,
