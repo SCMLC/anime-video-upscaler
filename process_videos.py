@@ -22,7 +22,7 @@ from tqdm import tqdm
 # =========================================================================
 # 💡 Configuration Section
 # =========================================================================
-BATCH_SIZE = 4                  # Number of frames fed into GPU per inference pass (reduce to 2 or 1 if VRAM is low)
+BATCH_SIZE = 2                  # Number of frames fed into GPU per inference pass (reduce to 2 or 1 if VRAM is low)
 TARGET_HEIGHT = 720             # Final target height (720p)
 
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.rmvb', '.webm', '.ts')
